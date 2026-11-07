@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
 # Tags a Codemagic test build in GitHub and creates its pre-release.
 #
-# Run as the Post-publish script of the Codemagic "Android Test" and
-# "iOS Test" workflows:
+# Shared by every app (Scorbord, Bonfire Crash Course, ...). Each app's
+# Codemagic test workflows download a pinned version of it in their
+# Post-publish script and run it with the app's repo and name:
 #
-#   bash scripts/tag_release.sh
+#   curl -fsSL https://raw.githubusercontent.com/trey-a-hope/codemagic-scripts/v1/tag_release.sh -o /tmp/tag_release.sh
+#   GITHUB_REPOSITORY=trey-a-hope/<app repo> APP_NAME=<App Name> bash /tmp/tag_release.sh
+#
+# It runs from /tmp, so it finds the app's checkout from $CM_BUILD_DIR (the
+# clone Codemagic built), falling back to the current directory.
 #
 # What it does, after a successful build:
 #   1. Reads the version from pubspec.yaml (e.g. 26.11.7+12) and names the
 #      tag v<versionName>+<versionCode> (e.g. v26.11.7+12).
 #   2. Creates an annotated tag on $CM_COMMIT, the exact commit built, with
-#      the Codemagic build number and workflow in its message.
+#      the app name, Codemagic build number and workflow in its message.
 #   3. Creates a GitHub pre-release for the tag, titled
 #      "<versionName> (<versionCode>)", whose body is release_notes.txt at
 #      that commit, unchanged. release_notes.txt is the only source of
@@ -20,25 +25,32 @@
 # time it runs, so every problem is printed as a WARNING with what to fix,
 # and the script exits 0.
 #
-# Needs GITHUB_TAG_TOKEN, a fine-grained token for trey-a-hope/scorbord only
-# with Contents read and write, stored in Codemagic as a secure variable.
+# Needs GITHUB_TAG_TOKEN, a fine-grained token for the app's own repo
+# ($GITHUB_REPOSITORY) with Contents read and write, stored in that app's
+# Codemagic environment variables as a secure variable.
 # The token is only ever sent in a request header and never printed.
 #
-# Environment (Codemagic sets all but the token):
+# Environment (Codemagic sets the CM_* and BUILD_NUMBER values; the
+# workflow sets the rest):
+#   GITHUB_REPOSITORY     owner/repo of the app, e.g. trey-a-hope/scorbord
+#                         (required)
+#   APP_NAME              app name for the tag message, e.g. Scorbord
+#                         (optional, defaults to the repo name)
 #   GITHUB_TAG_TOKEN      the token above (required)
 #   CM_COMMIT             commit that was built (required)
 #   CM_BUILD_STEP_STATUS  "success" when the build step passed
 #   BUILD_NUMBER          Codemagic build number, for the tag message
 #   CM_WORKFLOW_NAME      workflow name, for the tag message (optional)
-#   GITHUB_REPOSITORY     owner/repo, default trey-a-hope/scorbord
+#   CM_BUILD_DIR          the app's checkout (default: current directory)
 #   GITHUB_API_URL        default https://api.github.com (tests point it at
 #                         a local fake)
 
 set -uo pipefail
 
-REPO="${GITHUB_REPOSITORY:-trey-a-hope/scorbord}"
+REPO="${GITHUB_REPOSITORY:-}"
+APP="${APP_NAME:-${REPO##*/}}"
 API="${GITHUB_API_URL:-https://api.github.com}"
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "${CM_BUILD_DIR:-.}" && pwd)"
 
 warn() { echo "WARNING (build tag): $*" >&2; }
 info() { echo "build tag: $*"; }
@@ -100,8 +112,16 @@ main() {
     info "build step status is '${CM_BUILD_STEP_STATUS:-unset}', not 'success', so no tag."
     return 0
   fi
+  if [[ ! "$REPO" =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]]; then
+    warn "GITHUB_REPOSITORY is not set to owner/repo (got '$REPO'). Set it in the Post-publish script, e.g. GITHUB_REPOSITORY=trey-a-hope/scorbord APP_NAME=Scorbord bash /tmp/tag_release.sh. No tag."
+    return 0
+  fi
+  if [[ ! -f "$ROOT/pubspec.yaml" ]]; then
+    warn "no pubspec.yaml in $ROOT. Set CM_BUILD_DIR to the app's checkout or run the script from it. No tag."
+    return 0
+  fi
   if [[ -z "${GITHUB_TAG_TOKEN:-}" ]]; then
-    warn "GITHUB_TAG_TOKEN is not set. Add it in Codemagic (Scorbord app, Environment variables, Secure) and import its group in this workflow. The build itself shipped."
+    warn "GITHUB_TAG_TOKEN is not set. Add it in Codemagic ($APP app, Environment variables, Secure) and import its group in this workflow. The build itself shipped."
     return 0
   fi
   if [[ -z "${CM_COMMIT:-}" ]]; then
@@ -187,7 +207,7 @@ check_existing_tag() {
 # any other failure.
 create_tag() {
   local tag="$1" name="$2" code="$3"
-  local message="Scorbord $name ($code)
+  local message="$APP $name ($code)
 Codemagic build ${BUILD_NUMBER:-?}, workflow ${CM_WORKFLOW_NAME:-${FCI_WORKFLOW_NAME:-unknown}}"
   local sha
   gh_api POST "/repos/$REPO/git/tags" "$(json_object \
